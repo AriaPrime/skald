@@ -21,6 +21,7 @@ import { startMcpServer } from "./mcp-server.js";
 import { generateDashboard } from "./dashboard.js";
 import { generateBriefing } from "./briefing.js";
 import { startDashboardServer } from "./server.js";
+import { createSpec } from "./spec-author.js";
 import type { SkaldConfig, Plan, Phase } from "./types.js";
 
 // ─── Config ────────────────────────────────────────────────────────
@@ -383,6 +384,9 @@ Usage:
   skald plan briefing <product> <num>
     Generate a build briefing and copy to clipboard.
 
+  skald spec new <product> <subsystem> [--title "..."] [--desc "..."]
+    Scaffold a new spec file with frontmatter, version chain, and folder placement.
+
   skald dashboard [--out <path>]
     Generate a static HTML dashboard and open it in the browser.
 
@@ -422,6 +426,35 @@ switch (command) {
   case "plan":
     cmdPlan(config, positional, flags).catch(console.error);
     break;
+  case "spec": {
+    const specSub = positional[0] || "help";
+    if (specSub === "new") {
+      const product = positional[1];
+      const subsystem = positional[2];
+      if (!product || !subsystem) {
+        console.error("Usage: skald spec new <product> <subsystem> [--title \"...\"] [--desc \"...\"]");
+        process.exit(1);
+      }
+      const db = new SkaldDatabase(config.dbPath);
+      await db.init();
+      const result = await createSpec(db, {
+        product,
+        subsystem,
+        title: flags.title as string | undefined,
+        description: flags.desc as string | undefined,
+        specDir: config.specDirs[0],
+      });
+      db.close();
+      console.log(`Created: ${result.path}`);
+      console.log(`  Title: ${result.title}`);
+      console.log(`  Version: v${result.version}`);
+      if (result.supersedes) console.log(`  Supersedes: ${result.supersedes}`);
+      console.log(`\nEdit the file, then run 'skald build' to index it.`);
+    } else {
+      console.error("Usage: skald spec new <product> <subsystem>");
+    }
+    break;
+  }
   case "dashboard":
     cmdDashboard(config, flags).catch(console.error);
     break;
