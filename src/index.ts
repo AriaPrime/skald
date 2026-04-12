@@ -21,6 +21,7 @@ import { startMcpServer } from "./mcp-server.js";
 import { generateDashboard } from "./dashboard.js";
 import { generateBriefing } from "./briefing.js";
 import { startDashboardServer } from "./server.js";
+import { SpecWatcher } from "./watcher.js";
 import { createSpec } from "./spec-author.js";
 import type { SkaldConfig, Plan, Phase } from "./types.js";
 
@@ -390,6 +391,9 @@ Usage:
   skald dashboard [--out <path>]
     Generate a static HTML dashboard and open it in the browser.
 
+  skald watch
+    Watch spec directories for changes. Re-indexes on file save, alerts on conflicts.
+
   skald live [--port 18803]
     Start live dashboard server. Refreshes from DB on every page load.
 
@@ -518,6 +522,44 @@ switch (command) {
   case "serve":
     cmdServe(config).catch(console.error);
     break;
+  case "watch": {
+    if (!config.openaiApiKey) {
+      console.error("Error: OPENAI_API_KEY required for watch mode (re-embedding).");
+      process.exit(1);
+    }
+    const watchDb = new SkaldDatabase(config.dbPath);
+    await watchDb.init();
+    const watchEmbeddings = new EmbeddingService({ apiKey: config.openaiApiKey });
+
+    const watcher = new SpecWatcher({
+      specDirs: config.specDirs,
+      db: watchDb,
+      embeddings: watchEmbeddings,
+      onReindex: (path, action) => {
+        console.log(`[${action}] ${path}`);
+      },
+      onConflict: async (message) => {
+        console.warn(`[CONFLICT] ${message}`);
+        // Notify Aria via VESSEL API if available
+        try {
+          const resp = await fetch("http://localhost:18801/api/chat", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              message: `Skald drift alert: ${message}`,
+              channelId: "skald-alerts",
+            }),
+          });
+          if (resp.ok) console.log("  → Aria notified");
+        } catch {
+          // VESSEL not running — skip notification
+        }
+      },
+    });
+    watcher.start();
+    console.log("Watching for spec changes. Press Ctrl+C to stop.");
+    break;
+  }
   case "live": {
     const port = flags.port ? parseInt(flags.port as string) : 18803;
     startDashboardServer(config.dbPath, port).catch(console.error);
