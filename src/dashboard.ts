@@ -545,9 +545,30 @@ export function generateDashboardHtml(data: DashboardData): string {
   }
   .plan-header {
     display: flex;
-    align-items: baseline;
+    align-items: center;
     gap: 12px;
     margin-bottom: 4px;
+    cursor: pointer;
+    user-select: none;
+    padding: 4px 0;
+  }
+  .plan-header:hover .plan-chevron { color: var(--text-secondary); }
+  .plan-chevron {
+    margin-left: auto;
+    font-size: 14px;
+    color: var(--text-tertiary);
+    transition: transform 0.25s ease;
+  }
+  .plan-chevron.collapsed { transform: rotate(-90deg); }
+  .plan-body {
+    overflow: hidden;
+    transition: max-height 0.3s ease, opacity 0.25s ease;
+    max-height: 2000px;
+    opacity: 1;
+  }
+  .plan-body.collapsed {
+    max-height: 0;
+    opacity: 0;
   }
   .plan-title {
     font-size: 14px;
@@ -723,12 +744,14 @@ export function generateDashboardHtml(data: DashboardData): string {
           const completed = phases.filter((p) => p.status === "completed").length;
           const total = phases.length;
           return `
-    <div class="card plan-card">
-      <div class="plan-header">
+    <div class="card plan-card" data-plan-id="${plan.id}">
+      <div class="plan-header" onclick="togglePlan('${plan.id}')">
         <div class="product-badge">${(productEmoji[plan.product] || plan.product[0] || "?").toUpperCase()}</div>
         <div class="plan-title">${plan.title || plan.product.toUpperCase()}</div>
         <span style="font-size:10.5px; color:var(--text-tertiary)">${completed}/${total} phases</span>
+        <div class="plan-chevron" id="chevron-${plan.id}">&#9662;</div>
       </div>
+      <div class="plan-body" id="body-${plan.id}">
       ${plan.description ? `<div class="plan-desc">${plan.description}</div>` : ""}
       <div class="plan-progress">
         ${phases.map((p) => `<div class="progress-segment" style="background: ${
@@ -769,6 +792,7 @@ export function generateDashboardHtml(data: DashboardData): string {
           ${(p.status === "planned" && isNextPlanned) ? `<button class="btn-initiate" onclick="initPhase('${plan.id}', ${p.phaseNum})">Initiate</button>` : ""}
         </div>`;
       }).join("")}
+      </div>
     </div>`;
         }).join("")}
   </div>
@@ -913,6 +937,29 @@ export function generateDashboardHtml(data: DashboardData): string {
 </div>
 
 <script>
+  // Plan fold/unfold
+  function togglePlan(planId) {
+    const body = document.getElementById('body-' + planId);
+    const chevron = document.getElementById('chevron-' + planId);
+    if (body && chevron) {
+      body.classList.toggle('collapsed');
+      chevron.classList.toggle('collapsed');
+    }
+  }
+
+  // Auto-collapse completed plans (all phases done)
+  document.querySelectorAll('.plan-card').forEach(card => {
+    const planId = card.dataset.planId;
+    const phases = card.querySelectorAll('.phase-row');
+    const allDone = [...phases].every(p => {
+      const badge = p.querySelector('.badge');
+      return badge && (badge.textContent === 'completed' || badge.textContent === 'skipped');
+    });
+    if (allDone && phases.length > 0) {
+      togglePlan(planId);
+    }
+  });
+
   // View tab switching
   document.querySelectorAll('.view-tab').forEach(tab => {
     tab.addEventListener('click', () => {
