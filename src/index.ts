@@ -22,7 +22,7 @@ import { generateDashboard } from "./dashboard.js";
 import { generateBriefing } from "./briefing.js";
 import { startDashboardServer } from "./server.js";
 import { SpecWatcher } from "./watcher.js";
-import { createSpec } from "./spec-author.js";
+import { createSpec, createConcept } from "./spec-author.js";
 import type { SkaldConfig, Plan, Phase } from "./types.js";
 
 // ─── Config ────────────────────────────────────────────────────────
@@ -424,6 +424,9 @@ Usage:
   skald plan briefing <product> <num>
     Generate a build briefing and copy to clipboard.
 
+  skald concept <product> <subsystem> [--title "..."] [--desc "..."]
+    Scaffold a lightweight concept doc — for ideas before they become specs.
+
   skald spec new <product> <subsystem> [--title "..."] [--desc "..."]
     Scaffold a new spec file with frontmatter, version chain, and folder placement.
 
@@ -544,6 +547,25 @@ switch (command) {
     }
 
     db.close();
+    break;
+  }
+  case "concept": {
+    const product = positional[0];
+    const subsystem = positional[1];
+    if (!product || !subsystem) {
+      console.error("Usage: skald concept <product> <subsystem> [--title \"...\"] [--desc \"...\"]");
+      process.exit(1);
+    }
+    const result = await createConcept({
+      product,
+      subsystem,
+      title: flags.title as string | undefined,
+      description: flags.desc as string | undefined,
+      specDir: config.specDirs[0],
+    });
+    console.log(`Created: ${result.path}`);
+    console.log(`  Title: ${result.title}`);
+    console.log(`\nFill it in, then run 'skald build' to index it.`);
     break;
   }
   case "spec": {

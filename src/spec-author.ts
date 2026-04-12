@@ -143,6 +143,104 @@ ${opts.description ? `\n> ${opts.description}\n` : ""}
 }
 
 /**
+ * Generate concept document content — lighter than a spec.
+ */
+function generateConceptContent(opts: {
+  title: string;
+  product: string;
+  subsystem: string;
+  description?: string;
+}): string {
+  const date = new Date().toISOString().split("T")[0];
+
+  const frontmatter = [
+    "---",
+    `title: "${opts.title}"`,
+    `product: ${opts.product.toLowerCase()}`,
+    `subsystem: ${opts.subsystem.toLowerCase()}`,
+    `status: draft`,
+    `source_type: concept`,
+    `date: ${date}`,
+    "---",
+  ].join("\n");
+
+  const skeleton = `
+# ${opts.title}
+
+**Date:** ${date}
+**Product:** ${opts.product.toUpperCase()}
+**Subsystem:** ${opts.subsystem}
+${opts.description ? `\n> ${opts.description}\n` : ""}
+---
+
+## The Idea
+
+<!-- What is this and why does it matter? Keep it conversational. -->
+
+## How It Could Work
+
+<!-- Rough sketch — not architecture, just the shape of the thing. -->
+
+## What It Enables
+
+<!-- What becomes possible if this exists? What pain does it remove? -->
+
+## Open Questions
+
+<!-- What needs to be figured out before this becomes a spec? -->
+
+## Origin
+
+<!-- Where did this idea come from? A conversation with Aria? A pain point during a build? A Ronni late-night insight? -->
+`;
+
+  return frontmatter + "\n" + skeleton;
+}
+
+/**
+ * Create a new concept document.
+ */
+export async function createConcept(opts: {
+  product: string;
+  subsystem: string;
+  title?: string;
+  description?: string;
+  specDir: string;
+}): Promise<NewSpecResult> {
+  const { product, subsystem, specDir } = opts;
+
+  const subsystemTitle = subsystem
+    .split(/[-_\s]+/)
+    .map((w) => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase())
+    .join(" ");
+  const title = opts.title || `${product.toUpperCase()} ${subsystemTitle} — Concept`;
+
+  const productUpper = product.toUpperCase();
+  const subsystemUpper = subsystem.toUpperCase().replace(/-/g, " ");
+  const folder = join(specDir, productUpper, `${productUpper} ${subsystemUpper}`);
+  const filename = `${productUpper}-${subsystemTitle.replace(/\s+/g, "-")}-Concept.md`;
+  const fullPath = join(folder, filename);
+
+  await mkdir(folder, { recursive: true });
+
+  const content = generateConceptContent({
+    title,
+    product,
+    subsystem,
+    description: opts.description,
+  });
+
+  await writeFile(fullPath, content, "utf-8");
+
+  return {
+    path: fullPath,
+    version: 0,
+    supersedes: null,
+    title,
+  };
+}
+
+/**
  * Create a new spec file.
  */
 export async function createSpec(db: SkaldDatabase, opts: NewSpecOptions): Promise<NewSpecResult> {
