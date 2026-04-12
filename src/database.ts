@@ -9,7 +9,7 @@ import initSqlJs, { type Database as SqlJsDatabase } from "sql.js";
 import { readFile, writeFile, mkdir } from "fs/promises";
 import { dirname } from "path";
 import { embeddingToBuffer, bufferToEmbedding } from "./embeddings.js";
-import type { SpecDocument, SpecChunk, Plan, Phase } from "./types.js";
+import type { SpecDocument, SpecChunk, Plan, Phase, BuildSession } from "./types.js";
 
 export class SkaldDatabase {
   private db: SqlJsDatabase | null = null;
@@ -88,6 +88,21 @@ export class SkaldDatabase {
 
       CREATE INDEX IF NOT EXISTS idx_phase_plan ON phases(plan_id);
       CREATE INDEX IF NOT EXISTS idx_phase_status ON phases(status);
+
+      CREATE TABLE IF NOT EXISTS sessions (
+        id           TEXT PRIMARY KEY,
+        phase_id     TEXT NOT NULL,
+        plan_id      TEXT NOT NULL,
+        phase_num    INTEGER NOT NULL,
+        started_at   INTEGER NOT NULL,
+        ended_at     INTEGER,
+        duration_ms  INTEGER,
+        notes        TEXT,
+        status       TEXT DEFAULT 'active'
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_session_phase ON sessions(phase_id);
+      CREATE INDEX IF NOT EXISTS idx_session_status ON sessions(status);
     `);
     this.dirty = true;
   }
@@ -367,6 +382,106 @@ export class SkaldDatabase {
       startedAt: row.started_at as number | null,
       completedAt: row.completed_at as number | null,
       updatedAt: row.updated_at as number,
+    };
+  }
+
+  // ─── Session Operations ────────────────────────────────────────────
+
+  startSession(planId: string, phaseNum: number): BuildSession {
+    const now = Date.now();
+    const phaseId = `${planId}_${phaseNum}`;
+    const id = `${phaseId}_${now}`;
+    const session: BuildSession = {
+      id,
+      phaseId,
+      planId,
+      phaseNum,
+      startedAt: now,
+      endedAt: null,
+      durationMs: null,
+      notes: null,
+      status: "active",
+    };
+    this.db!.run(
+      `INSERT INTO sessions (id, phase_id, plan_id, phase_num, started_at, status) VALUES (?, ?, ?, ?, ?, ?)`,
+      [id, phaseId, planId, phaseNum, now, "active"],
+    );
+    this.dirty = true;
+    return session;
+  }
+
+  endSession(sessionId: string, status: string, notes?: string): void {
+    const now = Date.now();
+    const stmt = this.db!.prepare("SELECT started_at FROM sessions WHERE id = ?");
+    stmt.bind([sessionId]);
+    let durationMs: number | null = null;
+    if (stmt.step()) {
+      const startedAt = stmt.getAsObject().started_at as number;
+      durationMs = now - startedAt;
+    }
+    stmt.free();
+
+    this.db!.run(
+      `UPDATE sessions SET ended_at = ?, duration_ms = ?, notes = ?, status = ? WHERE id = ?`,
+      [now, durationMs, notes || null, status, sessionId],
+    );
+    this.dirty = true;
+  }
+
+  getActiveSessions(): BuildSession[] {
+    return this.querySessions("WHERE status = 'active'");
+  }
+
+  getSessionsForPhase(phaseId: string): BuildSession[] {
+    const stmt = this.db!.prepare("SELECT * FROM sessions WHERE phase_id = ? ORDER BY started_at DESC");
+    stmt.bind([phaseId]);
+    const results: BuildSession[] = [];
+    while (stmt.step()) {
+      results.push(this.rowToSession(stmt.getAsObject()));
+    }
+    stmt.free();
+    return results;
+  }
+
+  getAllSessionStats(): Map<string, { count: number; totalMs: number; lastAt: number | null }> {
+    const stats = new Map<string, { count: number; totalMs: number; lastAt: number | null }>();
+    const rows = this.db!.exec(
+      `SELECT phase_id, COUNT(*) as cnt, COALESCE(SUM(duration_ms), 0) as total_ms, MAX(started_at) as last_at
+       FROM sessions GROUP BY phase_id`
+    );
+    if (rows.length && rows[0].values.length) {
+      for (const row of rows[0].values) {
+        stats.set(row[0] as string, {
+          count: row[1] as number,
+          totalMs: row[2] as number,
+          lastAt: row[3] as number | null,
+        });
+      }
+    }
+    return stats;
+  }
+
+  private querySessions(where: string): BuildSession[] {
+    const stmt = this.db!.prepare(`SELECT * FROM sessions ${where} ORDER BY started_at DESC`);
+    const results: BuildSession[] = [];
+    while (stmt.step()) {
+      results.push(this.rowToSession(stmt.getAsObject()));
+    }
+    stmt.free();
+    return results;
+  }
+
+  private rowToSession(row: Record<string, any>): BuildSession {
+    return {
+      id: row.id as string,
+      phaseId: row.phase_id as string,
+      planId: row.plan_id as string,
+      phaseNum: row.phase_num as number,
+      startedAt: row.started_at as number,
+      endedAt: row.ended_at as number | null,
+      durationMs: row.duration_ms as number | null,
+      notes: row.notes as string | null,
+      status: row.status as string,
     };
   }
 

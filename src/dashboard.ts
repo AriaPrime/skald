@@ -7,7 +7,7 @@
 
 import { SkaldDatabase } from "./database.js";
 import { writeFile } from "fs/promises";
-import type { Plan, Phase } from "./types.js";
+import type { Plan, Phase, BuildSession } from "./types.js";
 
 interface DashboardData {
   generated: string;
@@ -19,6 +19,8 @@ interface DashboardData {
   lintIssues: Array<{ type: string; message: string }>;
   recentDocs: Array<{ title: string; product: string; subsystem: string | null; status: string; path: string; date: string | null }>;
   plans: Array<{ plan: Plan; phases: Phase[] }>;
+  sessionStats: Map<string, { count: number; totalMs: number; lastAt: number | null }>;
+  activeSessions: BuildSession[];
 }
 
 export function gatherDashboardData(db: SkaldDatabase): DashboardData {
@@ -92,6 +94,10 @@ export function gatherDashboardData(db: SkaldDatabase): DashboardData {
   const plansGrouped = db.getAllPhasesGrouped();
   const plans = Array.from(plansGrouped.values());
 
+  // Sessions
+  const sessionStats = db.getAllSessionStats();
+  const activeSessions = db.getActiveSessions();
+
   return {
     generated: new Date().toISOString(),
     stats,
@@ -102,6 +108,8 @@ export function gatherDashboardData(db: SkaldDatabase): DashboardData {
     lintIssues,
     recentDocs,
     plans,
+    sessionStats,
+    activeSessions,
   };
 }
 
@@ -738,12 +746,24 @@ export function generateDashboardHtml(data: DashboardData): string {
           : p.status === "active" && p.startedAt
           ? "started " + new Date(p.startedAt).toISOString().split("T")[0]
           : "";
+        const phaseId = `${plan.id}_${p.phaseNum}`;
+        const sessStats = data.sessionStats.get(phaseId);
+        const sessInfo = sessStats
+          ? (() => {
+              const totalHrs = Math.floor(sessStats.totalMs / 3600000);
+              const totalMins = Math.floor((sessStats.totalMs % 3600000) / 60000);
+              const timeStr = totalHrs > 0 ? `${totalHrs}h${totalMins}m` : `${totalMins}m`;
+              return `${sessStats.count} session${sessStats.count !== 1 ? "s" : ""}, ${timeStr}`;
+            })()
+          : null;
+        const hasActiveSession = data.activeSessions.some((s) => s.phaseId === phaseId);
         return `
-        <div class="phase-row${p.status === "active" ? " active-phase" : ""}" data-plan="${plan.id}" data-phase="${p.phaseNum}">
+        <div class="phase-row${p.status === "active" ? " active-phase" : ""}${hasActiveSession ? " has-active-session" : ""}" data-plan="${plan.id}" data-phase="${p.phaseNum}">
           <div class="phase-num">${p.phaseNum}</div>
           <div class="phase-dot ${p.status}"></div>
           <div class="phase-title">${p.title}</div>
           ${p.description ? `<div class="phase-desc">${p.description}</div>` : ""}
+          ${sessInfo ? `<div class="phase-date">${sessInfo}</div>` : ""}
           <span class="badge badge-${p.status === "planned" ? "draft" : p.status === "active" ? "current" : p.status}">${p.status}</span>
           ${dateStr ? `<div class="phase-date">${dateStr}</div>` : ""}
           ${(p.status === "planned" && isNextPlanned) ? `<button class="btn-initiate" onclick="initPhase('${plan.id}', ${p.phaseNum})">Initiate</button>` : ""}

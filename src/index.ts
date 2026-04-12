@@ -426,6 +426,63 @@ switch (command) {
   case "plan":
     cmdPlan(config, positional, flags).catch(console.error);
     break;
+  case "session": {
+    const sessSub = positional[0] || "list";
+    const db = new SkaldDatabase(config.dbPath);
+    await db.init();
+
+    if (sessSub === "start") {
+      const product = positional[1];
+      const num = parseInt(positional[2]);
+      if (!product || isNaN(num)) {
+        console.error("Usage: skald session start <product> <phase_num>");
+        process.exit(1);
+      }
+      const session = db.startSession(product.toLowerCase(), num);
+      await db.flush();
+      console.log(`Session started: ${session.id}`);
+      console.log(`  Phase: ${product} Phase ${num}`);
+      console.log(`  Use 'skald session end ${session.id}' when done.`);
+    } else if (sessSub === "end") {
+      const sessionId = positional[1];
+      const notes = positional.slice(2).join(" ") || (flags.notes as string) || null;
+      if (!sessionId) {
+        console.error("Usage: skald session end <session_id> [--notes \"...\"]");
+        process.exit(1);
+      }
+      db.endSession(sessionId, "completed", notes || undefined);
+      await db.flush();
+      console.log(`Session ended: ${sessionId}${notes ? " (notes saved)" : ""}`);
+    } else if (sessSub === "abandon") {
+      const sessionId = positional[1];
+      if (!sessionId) {
+        console.error("Usage: skald session abandon <session_id>");
+        process.exit(1);
+      }
+      db.endSession(sessionId, "abandoned");
+      await db.flush();
+      console.log(`Session abandoned: ${sessionId}`);
+    } else if (sessSub === "list") {
+      const active = db.getActiveSessions();
+      if (active.length === 0) {
+        console.log("No active sessions.");
+      } else {
+        console.log("Active sessions:");
+        for (const s of active) {
+          const elapsed = Date.now() - s.startedAt;
+          const mins = Math.floor(elapsed / 60000);
+          const hrs = Math.floor(mins / 60);
+          const timeStr = hrs > 0 ? `${hrs}h ${mins % 60}m` : `${mins}m`;
+          console.log(`  ${s.id}  (${s.planId} Phase ${s.phaseNum}, ${timeStr} elapsed)`);
+        }
+      }
+    } else {
+      console.error("Usage: skald session <start|end|abandon|list>");
+    }
+
+    db.close();
+    break;
+  }
   case "spec": {
     const specSub = positional[0] || "help";
     if (specSub === "new") {

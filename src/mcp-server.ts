@@ -228,6 +228,43 @@ export async function startMcpServer(config: SkaldConfig): Promise<void> {
     },
   );
 
+  // ─── session_start ─────────────────────────────────────────────
+
+  server.tool(
+    "session_start",
+    "Start a tracked build session for a plan phase. Call this at the beginning of a work session. Returns a session ID to use when ending the session.",
+    {
+      product: z.string().describe("Product name"),
+      phase_num: z.number().describe("Phase number to work on"),
+    },
+    async ({ product, phase_num }) => {
+      const session = db.startSession(product.toLowerCase(), phase_num);
+      await db.flush();
+      return {
+        content: [{ type: "text" as const, text: `Session started: **${session.id}**\nPhase: ${product} Phase ${phase_num}\n\nCall \`session_end\` with this session ID and notes when done.` }],
+      };
+    },
+  );
+
+  // ─── session_end ──────────────────────────────────────────────
+
+  server.tool(
+    "session_end",
+    "End a build session. Records duration and completion notes. Call this at the end of a work session.",
+    {
+      session_id: z.string().describe("Session ID from session_start"),
+      notes: z.string().optional().describe("What was accomplished, decisions made, issues found"),
+      status: z.enum(["completed", "abandoned"]).optional().describe("Session outcome (default: completed)"),
+    },
+    async ({ session_id, notes, status }) => {
+      db.endSession(session_id, status || "completed", notes);
+      await db.flush();
+      return {
+        content: [{ type: "text" as const, text: `Session ended: ${session_id} (${status || "completed"})${notes ? "\nNotes saved." : ""}` }],
+      };
+    },
+  );
+
   // ─── Start ─────────────────────────────────────────────────────
 
   const transport = new StdioServerTransport();

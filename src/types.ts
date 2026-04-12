@@ -90,3 +90,17 @@ export interface Phase {
   completedAt: number | null;
   updatedAt: number;
 }
+
+// ─── Sessions ──────────────────────────────────────────────────────
+
+export interface BuildSession {
+  id: string;
+  phaseId: string;       // plan_id + "_" + phase_num
+  planId: string;
+  phaseNum: number;
+  startedAt: number;
+  endedAt: number | null;
+  durationMs: number | null;
+  notes: string | null;
+  status: string;        // active | completed | abandoned
+}
