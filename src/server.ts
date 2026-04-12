@@ -12,15 +12,22 @@ import { SkaldDatabase } from "./database.js";
 import { gatherDashboardData, generateDashboardHtml } from "./dashboard.js";
 
 export async function startDashboardServer(dbPath: string, port: number): Promise<void> {
-  const db = new SkaldDatabase(dbPath);
-  await db.init();
+  // Re-open the DB on each request so we always see the latest data.
+  // sql.js loads the file into memory at init — it won't see external writes otherwise.
+  async function freshDb(): Promise<SkaldDatabase> {
+    const db = new SkaldDatabase(dbPath);
+    await db.init();
+    return db;
+  }
 
   const server = createServer(async (_req, res) => {
     const url = _req.url ?? "/";
 
     if (url === "/" || url === "/index.html") {
       try {
+        const db = await freshDb();
         const data = gatherDashboardData(db);
+        db.close();
         const html = generateDashboardHtml(data);
         res.writeHead(200, {
           "Content-Type": "text/html; charset=utf-8",
@@ -32,9 +39,10 @@ export async function startDashboardServer(dbPath: string, port: number): Promis
         res.end(`Error generating dashboard: ${err.message}`);
       }
     } else if (url === "/api/plans") {
-      // JSON endpoint for plans data
       try {
+        const db = await freshDb();
         const data = gatherDashboardData(db);
+        db.close();
         res.writeHead(200, {
           "Content-Type": "application/json",
           "Cache-Control": "no-cache",
@@ -46,7 +54,9 @@ export async function startDashboardServer(dbPath: string, port: number): Promis
       }
     } else if (url === "/api/stats") {
       try {
+        const db = await freshDb();
         const data = gatherDashboardData(db);
+        db.close();
         res.writeHead(200, {
           "Content-Type": "application/json",
           "Cache-Control": "no-cache",
