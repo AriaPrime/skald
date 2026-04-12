@@ -27,17 +27,49 @@ import type { SkaldConfig, Plan, Phase } from "./types.js";
 
 // ─── Config ────────────────────────────────────────────────────────
 
-const DEFAULT_SPEC_DIR = "C:\\Users\\ARIA_PRIME\\OneDrive\\Documents\\RONST\\NEWER DOCS\\PRIVATEERS\\A - Privateers AI\\AI PROTOTYPE";
-const DEFAULT_DB_PATH = "C:\\Users\\ARIA_PRIME\\vessel\\data\\skald.db";
+import { existsSync, readFileSync } from "fs";
+import { resolve } from "path";
+
+function findConfigFile(): string | null {
+  // Search: CWD, home dir, then up the directory tree
+  const candidates = [
+    resolve(".skaldrc.json"),
+    resolve(process.env.HOME || process.env.USERPROFILE || ".", ".skaldrc.json"),
+  ];
+  for (const c of candidates) {
+    if (existsSync(c)) return c;
+  }
+  return null;
+}
+
+function loadFileConfig(): Partial<SkaldConfig> {
+  const configPath = findConfigFile();
+  if (!configPath) return {};
+  try {
+    const raw = JSON.parse(readFileSync(configPath, "utf-8"));
+    return {
+      specDirs: raw.specDirs || (raw.specDir ? [raw.specDir] : undefined),
+      dbPath: raw.dbPath,
+      openaiApiKey: raw.openaiApiKey,
+    };
+  } catch {
+    return {};
+  }
+}
 
 function getConfig(args: string[]): SkaldConfig {
   const dirIdx = args.indexOf("--dir");
   const dbIdx = args.indexOf("--db");
+  const fileConfig = loadFileConfig();
 
   return {
-    specDirs: [dirIdx >= 0 ? args[dirIdx + 1] : (process.env.SKALD_SPEC_DIR || DEFAULT_SPEC_DIR)],
-    dbPath: dbIdx >= 0 ? args[dbIdx + 1] : (process.env.SKALD_DB_PATH || DEFAULT_DB_PATH),
-    openaiApiKey: process.env.OPENAI_API_KEY || "",
+    specDirs: dirIdx >= 0
+      ? [args[dirIdx + 1]]
+      : fileConfig.specDirs || (process.env.SKALD_SPEC_DIR ? [process.env.SKALD_SPEC_DIR] : []),
+    dbPath: dbIdx >= 0
+      ? args[dbIdx + 1]
+      : fileConfig.dbPath || process.env.SKALD_DB_PATH || resolve("skald.db"),
+    openaiApiKey: process.env.OPENAI_API_KEY || fileConfig.openaiApiKey || "",
   };
 }
 
@@ -69,6 +101,10 @@ function parseArgs(args: string[]): { command: string; positional: string[]; fla
 async function cmdBuild(config: SkaldConfig, verbose: boolean): Promise<void> {
   if (!config.openaiApiKey) {
     console.error("Error: OPENAI_API_KEY environment variable is required for embedding generation.");
+    process.exit(1);
+  }
+  if (config.specDirs.length === 0) {
+    console.error("Error: No spec directory configured. Run 'skald init <path>' or set SKALD_SPEC_DIR.");
     process.exit(1);
   }
 
@@ -343,7 +379,7 @@ async function cmdPlan(config: SkaldConfig, positional: string[], flags: Record<
   db.close();
 }
 
-const DEFAULT_DASHBOARD_PATH = "C:\\Users\\ARIA_PRIME\\vessel\\data\\skald-dashboard.html";
+const DEFAULT_DASHBOARD_PATH = resolve("skald-dashboard.html");
 
 async function cmdDashboard(config: SkaldConfig, flags: Record<string, string | boolean>): Promise<void> {
   const db = new SkaldDatabase(config.dbPath);
@@ -362,9 +398,12 @@ async function cmdDashboard(config: SkaldConfig, flags: Record<string, string | 
 
 function printHelp(): void {
   console.log(`
-Skald — Spec Index for VESSEL / ANIMUS / Privateers AI
+Skald — Spec Index & Project Planning Tool
 
 Usage:
+  skald init [<spec-dir>]
+    Create a .skaldrc.json config file in the current directory.
+
   skald build [--dir <path>] [--db <path>] [--verbose]
     Index a spec directory into SQLite + embeddings.
 
@@ -414,6 +453,26 @@ const { command, positional, flags } = parseArgs(args);
 const config = getConfig(args);
 
 switch (command) {
+  case "init": {
+    const initPath = resolve(".skaldrc.json");
+    if (existsSync(initPath)) {
+      console.log(`Config already exists: ${initPath}`);
+      console.log(readFileSync(initPath, "utf-8"));
+    } else {
+      const specDir = positional[0] || process.cwd();
+      const initConfig = {
+        specDirs: [specDir],
+        dbPath: resolve("skald.db"),
+        openaiApiKey: "${OPENAI_API_KEY}",
+      };
+      const { writeFileSync } = await import("fs");
+      writeFileSync(initPath, JSON.stringify(initConfig, null, 2) + "\n");
+      console.log(`Created ${initPath}`);
+      console.log(`\nEdit the file to set your spec directory and API key.`);
+      console.log(`Then run: skald build`);
+    }
+    break;
+  }
   case "build":
     cmdBuild(config, !!flags.verbose).catch(console.error);
     break;
