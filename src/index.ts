@@ -20,6 +20,7 @@ import { SkaldSearch } from "./search.js";
 import { startMcpServer } from "./mcp-server.js";
 import { generateDashboard } from "./dashboard.js";
 import { generateBriefing } from "./briefing.js";
+import { startDashboardServer } from "./server.js";
 import type { SkaldConfig, Plan, Phase } from "./types.js";
 
 // ─── Config ────────────────────────────────────────────────────────
@@ -383,7 +384,10 @@ Usage:
     Generate a build briefing and copy to clipboard.
 
   skald dashboard [--out <path>]
-    Generate an HTML dashboard and open it in the browser.
+    Generate a static HTML dashboard and open it in the browser.
+
+  skald live [--port 18803]
+    Start live dashboard server. Refreshes from DB on every page load.
 
   skald serve [--dir <path>] [--db <path>]
     Start MCP server on stdio (for Claude Code integration).
@@ -424,6 +428,11 @@ switch (command) {
   case "serve":
     cmdServe(config).catch(console.error);
     break;
+  case "live": {
+    const port = flags.port ? parseInt(flags.port as string) : 18803;
+    startDashboardServer(config.dbPath, port).catch(console.error);
+    break;
+  }
   default:
     printHelp();
 }
