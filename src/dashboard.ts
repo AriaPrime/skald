@@ -1032,6 +1032,28 @@ export function generateDashboardHtml(data: DashboardData): string {
       });
     }
   }
+
+  // Auto-refresh: poll for changes every 10s, reload page if data changed
+  let lastHash = '${JSON.stringify(data.generated)}';
+  setInterval(async () => {
+    try {
+      const resp = await fetch('/api/stats');
+      if (!resp.ok) return;
+      const stats = await resp.json();
+      if (stats.generated !== lastHash) {
+        lastHash = stats.generated;
+        location.reload();
+      }
+    } catch {}
+  }, 10000);
+
+  // Live indicator
+  const headerTs = document.querySelector('.timestamp');
+  if (headerTs) {
+    const dot = document.createElement('span');
+    dot.style.cssText = 'display:inline-block;width:6px;height:6px;border-radius:50%;background:#4CAF50;margin-right:6px;animation:pulse 2s infinite;vertical-align:middle;';
+    headerTs.prepend(dot);
+  }
 </script>
 </body>
 </html>`;

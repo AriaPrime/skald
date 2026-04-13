@@ -22,6 +22,7 @@ import { generateDashboard } from "./dashboard.js";
 import { generateBriefing } from "./briefing.js";
 import { startDashboardServer } from "./server.js";
 import { SpecWatcher } from "./watcher.js";
+import { startDaemon } from "./daemon.js";
 import { createSpec, createConcept } from "./spec-author.js";
 import type { SkaldConfig, Plan, Phase } from "./types.js";
 
@@ -644,6 +645,11 @@ switch (command) {
   case "live": {
     const port = flags.port ? parseInt(flags.port as string) : 18803;
     startDashboardServer(config.dbPath, port).catch(console.error);
+    break;
+  }
+  case "daemon": {
+    const port = flags.port ? parseInt(flags.port as string) : 18803;
+    startDaemon(config, port).catch(console.error);
     break;
   }
   default:
