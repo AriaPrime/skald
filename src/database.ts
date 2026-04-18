@@ -1,40 +1,37 @@
 /**
  * Skald Database
  *
- * SQLite persistence for spec documents and chunks with embeddings.
- * Uses sql.js (pure JS, same as @vessel/core) for portability.
+ * SQLite persistence for spec documents, chunks, plans, phases, and sessions.
+ * Uses better-sqlite3 for proper file-level locking — multiple processes
+ * (daemon, MCP server, CLI) can safely read and write simultaneously.
  */
 
-import initSqlJs, { type Database as SqlJsDatabase } from "sql.js";
-import { readFile, writeFile, mkdir } from "fs/promises";
+import Database from "better-sqlite3";
+import { mkdirSync, existsSync } from "fs";
 import { dirname } from "path";
 import { embeddingToBuffer, bufferToEmbedding } from "./embeddings.js";
 import type { SpecDocument, SpecChunk, Plan, Phase, BuildSession } from "./types.js";
 
 export class SkaldDatabase {
-  private db: SqlJsDatabase | null = null;
+  private db: Database.Database | null = null;
   private dbPath: string;
-  private dirty = false;
 
   constructor(dbPath: string) {
     this.dbPath = dbPath;
   }
 
   async init(): Promise<void> {
-    const SQL = await initSqlJs();
+    const dir = dirname(this.dbPath);
+    if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
 
-    try {
-      const buffer = await readFile(this.dbPath);
-      this.db = new SQL.Database(buffer);
-    } catch {
-      this.db = new SQL.Database();
-    }
-
+    this.db = new Database(this.dbPath);
+    this.db.pragma("journal_mode = WAL");  // Write-Ahead Logging for concurrent reads
+    this.db.pragma("busy_timeout = 5000"); // Wait up to 5s for locks
     this.createSchema();
   }
 
   private createSchema(): void {
-    this.db!.run(`
+    this.db!.exec(`
       CREATE TABLE IF NOT EXISTS documents (
         id            TEXT PRIMARY KEY,
         path          TEXT NOT NULL UNIQUE,
@@ -104,226 +101,151 @@ export class SkaldDatabase {
       CREATE INDEX IF NOT EXISTS idx_session_phase ON sessions(phase_id);
       CREATE INDEX IF NOT EXISTS idx_session_status ON sessions(status);
     `);
-    this.dirty = true;
   }
 
   // ─── Document Operations ─────────────────────────────────────────
 
+  private _upsertDoc = this.lazy(() => this.db!.prepare(
+    `INSERT OR REPLACE INTO documents (id, path, title, product, subsystem, status, source_type, supersedes, date, content_hash, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+  ));
+
   upsertDocument(doc: SpecDocument): void {
-    this.db!.run(
-      `INSERT OR REPLACE INTO documents (id, path, title, product, subsystem, status, source_type, supersedes, date, content_hash, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [doc.id, doc.path, doc.title, doc.product, doc.subsystem, doc.status, doc.sourceType, doc.supersedes, doc.date, doc.contentHash, doc.updatedAt],
+    this._upsertDoc().run(
+      doc.id, doc.path, doc.title, doc.product, doc.subsystem, doc.status,
+      doc.sourceType, doc.supersedes, doc.date, doc.contentHash, doc.updatedAt,
     );
-    this.dirty = true;
   }
 
   getDocumentByPath(path: string): SpecDocument | null {
-    const stmt = this.db!.prepare("SELECT * FROM documents WHERE path = ?");
-    stmt.bind([path]);
-    if (!stmt.step()) { stmt.free(); return null; }
-    const row = stmt.getAsObject();
-    stmt.free();
-    return {
-      id: row.id as string,
-      path: row.path as string,
-      title: row.title as string,
-      product: row.product as string,
-      subsystem: row.subsystem as string | null,
-      status: row.status as string,
-      sourceType: row.source_type as string,
-      supersedes: row.supersedes as string | null,
-      date: row.date as string | null,
-      contentHash: row.content_hash as string,
-      updatedAt: row.updated_at as number,
-    };
+    const row = this.db!.prepare("SELECT * FROM documents WHERE path = ?").get(path) as any;
+    return row ? this.rowToDocument(row) : null;
   }
 
   getDocumentById(id: string): SpecDocument | null {
-    const stmt = this.db!.prepare("SELECT * FROM documents WHERE id = ?");
-    stmt.bind([id]);
-    if (!stmt.step()) { stmt.free(); return null; }
-    const row = stmt.getAsObject();
-    stmt.free();
-    return {
-      id: row.id as string,
-      path: row.path as string,
-      title: row.title as string,
-      product: row.product as string,
-      subsystem: row.subsystem as string | null,
-      status: row.status as string,
-      sourceType: row.source_type as string,
-      supersedes: row.supersedes as string | null,
-      date: row.date as string | null,
-      contentHash: row.content_hash as string,
-      updatedAt: row.updated_at as number,
-    };
+    const row = this.db!.prepare("SELECT * FROM documents WHERE id = ?").get(id) as any;
+    return row ? this.rowToDocument(row) : null;
   }
 
   findDocuments(filters: { subsystem?: string; product?: string; status?: string }): SpecDocument[] {
     const conditions: string[] = [];
-    const params: string[] = [];
+    const params: any[] = [];
     if (filters.subsystem) { conditions.push("subsystem = ?"); params.push(filters.subsystem); }
     if (filters.product) { conditions.push("product = ?"); params.push(filters.product); }
     if (filters.status) { conditions.push("status = ?"); params.push(filters.status); }
 
     const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
-    const stmt = this.db!.prepare(`SELECT * FROM documents ${where}`);
-    if (params.length > 0) stmt.bind(params);
-
-    const results: SpecDocument[] = [];
-    while (stmt.step()) {
-      const row = stmt.getAsObject();
-      results.push({
-        id: row.id as string,
-        path: row.path as string,
-        title: row.title as string,
-        product: row.product as string,
-        subsystem: row.subsystem as string | null,
-        status: row.status as string,
-        sourceType: row.source_type as string,
-        supersedes: row.supersedes as string | null,
-        date: row.date as string | null,
-        contentHash: row.content_hash as string,
-        updatedAt: row.updated_at as number,
-      });
-    }
-    stmt.free();
-    return results;
+    const rows = this.db!.prepare(`SELECT * FROM documents ${where}`).all(...params) as any[];
+    return rows.map((r) => this.rowToDocument(r));
   }
 
   deleteDocumentChunks(docId: string): void {
-    this.db!.run("DELETE FROM chunks WHERE doc_id = ?", [docId]);
-    this.dirty = true;
+    this.db!.prepare("DELETE FROM chunks WHERE doc_id = ?").run(docId);
+  }
+
+  private rowToDocument(row: any): SpecDocument {
+    return {
+      id: row.id,
+      path: row.path,
+      title: row.title,
+      product: row.product,
+      subsystem: row.subsystem,
+      status: row.status,
+      sourceType: row.source_type,
+      supersedes: row.supersedes,
+      date: row.date,
+      contentHash: row.content_hash,
+      updatedAt: row.updated_at,
+    };
   }
 
   // ─── Chunk Operations ────────────────────────────────────────────
 
+  private _upsertChunk = this.lazy(() => this.db!.prepare(
+    `INSERT OR REPLACE INTO chunks (id, doc_id, heading, heading_chain, content, embedding, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`
+  ));
+
   insertChunk(chunk: SpecChunk): void {
     const embBlob = chunk.embedding ? embeddingToBuffer(chunk.embedding) : null;
-    this.db!.run(
-      `INSERT OR REPLACE INTO chunks (id, doc_id, heading, heading_chain, content, embedding, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
-      [chunk.id, chunk.docId, chunk.heading, chunk.headingChain, chunk.content, embBlob, chunk.updatedAt],
+    this._upsertChunk().run(
+      chunk.id, chunk.docId, chunk.heading, chunk.headingChain, chunk.content, embBlob, chunk.updatedAt,
     );
-    this.dirty = true;
   }
 
   getAllChunksWithEmbeddings(filters?: { status?: string; subsystem?: string; product?: string; sourceType?: string }): Array<SpecChunk & { docPath: string; docTitle: string; docStatus: string; docSubsystem: string | null; docProduct: string; docSourceType: string }> {
     const conditions: string[] = ["c.embedding IS NOT NULL"];
-    const params: string[] = [];
+    const params: any[] = [];
 
     if (filters?.status) { conditions.push("d.status = ?"); params.push(filters.status); }
     if (filters?.subsystem) { conditions.push("d.subsystem = ?"); params.push(filters.subsystem); }
     if (filters?.product) { conditions.push("d.product = ?"); params.push(filters.product); }
     if (filters?.sourceType) { conditions.push("d.source_type = ?"); params.push(filters.sourceType); }
 
-    const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
-    const stmt = this.db!.prepare(`
+    const where = `WHERE ${conditions.join(" AND ")}`;
+    const rows = this.db!.prepare(`
       SELECT c.*, d.path as doc_path, d.title as doc_title, d.status as doc_status,
              d.subsystem as doc_subsystem, d.product as doc_product, d.source_type as doc_source_type
       FROM chunks c JOIN documents d ON c.doc_id = d.id
       ${where}
-    `);
-    if (params.length > 0) stmt.bind(params);
+    `).all(...params) as any[];
 
-    const results: Array<SpecChunk & { docPath: string; docTitle: string; docStatus: string; docSubsystem: string | null; docProduct: string; docSourceType: string }> = [];
-    while (stmt.step()) {
-      const row = stmt.getAsObject();
-      const embBuf = row.embedding as Uint8Array | null;
-      results.push({
-        id: row.id as string,
-        docId: row.doc_id as string,
-        heading: row.heading as string | null,
-        headingChain: row.heading_chain as string | null,
-        content: row.content as string,
-        embedding: embBuf ? bufferToEmbedding(Buffer.from(embBuf)) : null,
-        updatedAt: row.updated_at as number,
-        docPath: row.doc_path as string,
-        docTitle: row.doc_title as string,
-        docStatus: row.doc_status as string,
-        docSubsystem: row.doc_subsystem as string | null,
-        docProduct: row.doc_product as string,
-        docSourceType: row.doc_source_type as string,
-      });
-    }
-    stmt.free();
-    return results;
+    return rows.map((row) => ({
+      id: row.id,
+      docId: row.doc_id,
+      heading: row.heading,
+      headingChain: row.heading_chain,
+      content: row.content,
+      embedding: row.embedding ? bufferToEmbedding(Buffer.from(row.embedding)) : null,
+      updatedAt: row.updated_at,
+      docPath: row.doc_path,
+      docTitle: row.doc_title,
+      docStatus: row.doc_status,
+      docSubsystem: row.doc_subsystem,
+      docProduct: row.doc_product,
+      docSourceType: row.doc_source_type,
+    }));
   }
 
   // ─── Plan Operations ──────────────────────────────────────────────
 
   upsertPlan(plan: Plan): void {
-    this.db!.run(
-      `INSERT OR REPLACE INTO plans (id, product, title, description, updated_at)
-       VALUES (?, ?, ?, ?, ?)`,
-      [plan.id, plan.product, plan.title, plan.description, plan.updatedAt],
-    );
-    this.dirty = true;
+    this.db!.prepare(
+      `INSERT OR REPLACE INTO plans (id, product, title, description, updated_at) VALUES (?, ?, ?, ?, ?)`
+    ).run(plan.id, plan.product, plan.title, plan.description, plan.updatedAt);
   }
 
   getAllPlans(): Plan[] {
-    const stmt = this.db!.prepare("SELECT * FROM plans ORDER BY product");
-    const results: Plan[] = [];
-    while (stmt.step()) {
-      const row = stmt.getAsObject();
-      results.push({
-        id: row.id as string,
-        product: row.product as string,
-        title: row.title as string,
-        description: row.description as string | null,
-        updatedAt: row.updated_at as number,
-      });
-    }
-    stmt.free();
-    return results;
+    const rows = this.db!.prepare("SELECT * FROM plans ORDER BY product").all() as any[];
+    return rows.map((r) => ({
+      id: r.id, product: r.product, title: r.title,
+      description: r.description, updatedAt: r.updated_at,
+    }));
   }
 
   getPlan(planId: string): Plan | null {
-    const stmt = this.db!.prepare("SELECT * FROM plans WHERE id = ?");
-    stmt.bind([planId]);
-    if (!stmt.step()) { stmt.free(); return null; }
-    const row = stmt.getAsObject();
-    stmt.free();
-    return {
-      id: row.id as string,
-      product: row.product as string,
-      title: row.title as string,
-      description: row.description as string | null,
-      updatedAt: row.updated_at as number,
-    };
+    const row = this.db!.prepare("SELECT * FROM plans WHERE id = ?").get(planId) as any;
+    if (!row) return null;
+    return { id: row.id, product: row.product, title: row.title, description: row.description, updatedAt: row.updated_at };
   }
 
   // ─── Phase Operations ─────────────────────────────────────────────
 
   upsertPhase(phase: Phase): void {
-    this.db!.run(
+    this.db!.prepare(
       `INSERT OR REPLACE INTO phases (id, plan_id, phase_num, title, description, status, spec_refs, notes, started_at, completed_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [phase.id, phase.planId, phase.phaseNum, phase.title, phase.description, phase.status, phase.specRefs, phase.notes, phase.startedAt, phase.completedAt, phase.updatedAt],
-    );
-    this.dirty = true;
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    ).run(phase.id, phase.planId, phase.phaseNum, phase.title, phase.description, phase.status, phase.specRefs, phase.notes, phase.startedAt, phase.completedAt, phase.updatedAt);
   }
 
   getPhases(planId: string): Phase[] {
-    const stmt = this.db!.prepare("SELECT * FROM phases WHERE plan_id = ? ORDER BY phase_num");
-    stmt.bind([planId]);
-    const results: Phase[] = [];
-    while (stmt.step()) {
-      const row = stmt.getAsObject();
-      results.push(this.rowToPhase(row));
-    }
-    stmt.free();
-    return results;
+    const rows = this.db!.prepare("SELECT * FROM phases WHERE plan_id = ? ORDER BY phase_num").all(planId) as any[];
+    return rows.map((r) => this.rowToPhase(r));
   }
 
   getPhase(planId: string, phaseNum: number): Phase | null {
-    const stmt = this.db!.prepare("SELECT * FROM phases WHERE plan_id = ? AND phase_num = ?");
-    stmt.bind([planId, phaseNum]);
-    if (!stmt.step()) { stmt.free(); return null; }
-    const row = stmt.getAsObject();
-    stmt.free();
-    return this.rowToPhase(row);
+    const row = this.db!.prepare("SELECT * FROM phases WHERE plan_id = ? AND phase_num = ?").get(planId, phaseNum) as any;
+    return row ? this.rowToPhase(row) : null;
   }
 
   updatePhaseStatus(planId: string, phaseNum: number, status: string, notes?: string): void {
@@ -331,33 +253,17 @@ export class SkaldDatabase {
     const updates: string[] = ["status = ?", "updated_at = ?"];
     const params: (string | number)[] = [status, now];
 
-    if (status === "active") {
-      updates.push("started_at = ?");
-      params.push(now);
-    } else if (status === "completed") {
-      updates.push("completed_at = ?");
-      params.push(now);
-    }
-
-    if (notes !== undefined) {
-      updates.push("notes = ?");
-      params.push(notes);
-    }
+    if (status === "active") { updates.push("started_at = ?"); params.push(now); }
+    else if (status === "completed") { updates.push("completed_at = ?"); params.push(now); }
+    if (notes !== undefined) { updates.push("notes = ?"); params.push(notes); }
 
     params.push(planId, phaseNum);
-    this.db!.run(
-      `UPDATE phases SET ${updates.join(", ")} WHERE plan_id = ? AND phase_num = ?`,
-      params,
-    );
-    this.dirty = true;
+    this.db!.prepare(`UPDATE phases SET ${updates.join(", ")} WHERE plan_id = ? AND phase_num = ?`).run(...params);
   }
 
   updatePhaseNotes(planId: string, phaseNum: number, notes: string): void {
-    this.db!.run(
-      "UPDATE phases SET notes = ?, updated_at = ? WHERE plan_id = ? AND phase_num = ?",
-      [notes, Date.now(), planId, phaseNum],
-    );
-    this.dirty = true;
+    this.db!.prepare("UPDATE phases SET notes = ?, updated_at = ? WHERE plan_id = ? AND phase_num = ?")
+      .run(notes, Date.now(), planId, phaseNum);
   }
 
   getAllPhasesGrouped(): Map<string, { plan: Plan; phases: Phase[] }> {
@@ -369,19 +275,12 @@ export class SkaldDatabase {
     return grouped;
   }
 
-  private rowToPhase(row: Record<string, any>): Phase {
+  private rowToPhase(row: any): Phase {
     return {
-      id: row.id as string,
-      planId: row.plan_id as string,
-      phaseNum: row.phase_num as number,
-      title: row.title as string,
-      description: row.description as string | null,
-      status: row.status as string,
-      specRefs: row.spec_refs as string | null,
-      notes: row.notes as string | null,
-      startedAt: row.started_at as number | null,
-      completedAt: row.completed_at as number | null,
-      updatedAt: row.updated_at as number,
+      id: row.id, planId: row.plan_id, phaseNum: row.phase_num,
+      title: row.title, description: row.description, status: row.status,
+      specRefs: row.spec_refs, notes: row.notes,
+      startedAt: row.started_at, completedAt: row.completed_at, updatedAt: row.updated_at,
     };
   }
 
@@ -391,117 +290,65 @@ export class SkaldDatabase {
     const now = Date.now();
     const phaseId = `${planId}_${phaseNum}`;
     const id = `${phaseId}_${now}`;
-    const session: BuildSession = {
-      id,
-      phaseId,
-      planId,
-      phaseNum,
-      startedAt: now,
-      endedAt: null,
-      durationMs: null,
-      notes: null,
-      status: "active",
-    };
-    this.db!.run(
-      `INSERT INTO sessions (id, phase_id, plan_id, phase_num, started_at, status) VALUES (?, ?, ?, ?, ?, ?)`,
-      [id, phaseId, planId, phaseNum, now, "active"],
-    );
-    this.dirty = true;
-    return session;
+    this.db!.prepare(
+      `INSERT INTO sessions (id, phase_id, plan_id, phase_num, started_at, status) VALUES (?, ?, ?, ?, ?, ?)`
+    ).run(id, phaseId, planId, phaseNum, now, "active");
+    return { id, phaseId, planId, phaseNum, startedAt: now, endedAt: null, durationMs: null, notes: null, status: "active" };
   }
 
   endSession(sessionId: string, status: string, notes?: string): void {
     const now = Date.now();
-    const stmt = this.db!.prepare("SELECT started_at FROM sessions WHERE id = ?");
-    stmt.bind([sessionId]);
-    let durationMs: number | null = null;
-    if (stmt.step()) {
-      const startedAt = stmt.getAsObject().started_at as number;
-      durationMs = now - startedAt;
-    }
-    stmt.free();
-
-    this.db!.run(
-      `UPDATE sessions SET ended_at = ?, duration_ms = ?, notes = ?, status = ? WHERE id = ?`,
-      [now, durationMs, notes || null, status, sessionId],
-    );
-    this.dirty = true;
+    const row = this.db!.prepare("SELECT started_at FROM sessions WHERE id = ?").get(sessionId) as any;
+    const durationMs = row ? now - row.started_at : null;
+    this.db!.prepare(
+      `UPDATE sessions SET ended_at = ?, duration_ms = ?, notes = ?, status = ? WHERE id = ?`
+    ).run(now, durationMs, notes || null, status, sessionId);
   }
 
   getActiveSessions(): BuildSession[] {
-    return this.querySessions("WHERE status = 'active'");
+    const rows = this.db!.prepare("SELECT * FROM sessions WHERE status = 'active' ORDER BY started_at DESC").all() as any[];
+    return rows.map((r) => this.rowToSession(r));
   }
 
   getSessionsForPhase(phaseId: string): BuildSession[] {
-    const stmt = this.db!.prepare("SELECT * FROM sessions WHERE phase_id = ? ORDER BY started_at DESC");
-    stmt.bind([phaseId]);
-    const results: BuildSession[] = [];
-    while (stmt.step()) {
-      results.push(this.rowToSession(stmt.getAsObject()));
-    }
-    stmt.free();
-    return results;
+    const rows = this.db!.prepare("SELECT * FROM sessions WHERE phase_id = ? ORDER BY started_at DESC").all(phaseId) as any[];
+    return rows.map((r) => this.rowToSession(r));
   }
 
   getAllSessionStats(): Map<string, { count: number; totalMs: number; lastAt: number | null }> {
     const stats = new Map<string, { count: number; totalMs: number; lastAt: number | null }>();
-    const rows = this.db!.exec(
+    const rows = this.db!.prepare(
       `SELECT phase_id, COUNT(*) as cnt, COALESCE(SUM(duration_ms), 0) as total_ms, MAX(started_at) as last_at
        FROM sessions GROUP BY phase_id`
-    );
-    if (rows.length && rows[0].values.length) {
-      for (const row of rows[0].values) {
-        stats.set(row[0] as string, {
-          count: row[1] as number,
-          totalMs: row[2] as number,
-          lastAt: row[3] as number | null,
-        });
-      }
+    ).all() as any[];
+    for (const row of rows) {
+      stats.set(row.phase_id, { count: row.cnt, totalMs: row.total_ms, lastAt: row.last_at });
     }
     return stats;
   }
 
-  private querySessions(where: string): BuildSession[] {
-    const stmt = this.db!.prepare(`SELECT * FROM sessions ${where} ORDER BY started_at DESC`);
-    const results: BuildSession[] = [];
-    while (stmt.step()) {
-      results.push(this.rowToSession(stmt.getAsObject()));
-    }
-    stmt.free();
-    return results;
-  }
-
-  private rowToSession(row: Record<string, any>): BuildSession {
+  private rowToSession(row: any): BuildSession {
     return {
-      id: row.id as string,
-      phaseId: row.phase_id as string,
-      planId: row.plan_id as string,
-      phaseNum: row.phase_num as number,
-      startedAt: row.started_at as number,
-      endedAt: row.ended_at as number | null,
-      durationMs: row.duration_ms as number | null,
-      notes: row.notes as string | null,
-      status: row.status as string,
+      id: row.id, phaseId: row.phase_id, planId: row.plan_id,
+      phaseNum: row.phase_num, startedAt: row.started_at, endedAt: row.ended_at,
+      durationMs: row.duration_ms, notes: row.notes, status: row.status,
     };
   }
 
   // ─── Stats ────────────────────────────────────────────────────────
 
   stats(): { documents: number; chunks: number; withEmbeddings: number } {
-    const docs = this.db!.exec("SELECT COUNT(*) FROM documents")[0]?.values[0]?.[0] as number ?? 0;
-    const chunks = this.db!.exec("SELECT COUNT(*) FROM chunks")[0]?.values[0]?.[0] as number ?? 0;
-    const embedded = this.db!.exec("SELECT COUNT(*) FROM chunks WHERE embedding IS NOT NULL")[0]?.values[0]?.[0] as number ?? 0;
+    const docs = (this.db!.prepare("SELECT COUNT(*) as c FROM documents").get() as any).c;
+    const chunks = (this.db!.prepare("SELECT COUNT(*) as c FROM chunks").get() as any).c;
+    const embedded = (this.db!.prepare("SELECT COUNT(*) as c FROM chunks WHERE embedding IS NOT NULL").get() as any).c;
     return { documents: docs, chunks, withEmbeddings: embedded };
   }
 
   // ─── Persistence ─────────────────────────────────────────────────
 
   async flush(): Promise<void> {
-    if (!this.dirty || !this.db) return;
-    const data = this.db.export();
-    await mkdir(dirname(this.dbPath), { recursive: true });
-    await writeFile(this.dbPath, Buffer.from(data));
-    this.dirty = false;
+    // No-op: better-sqlite3 writes to disk immediately.
+    // Kept for API compatibility with existing callers.
   }
 
   close(): void {
@@ -509,5 +356,16 @@ export class SkaldDatabase {
       this.db.close();
       this.db = null;
     }
+  }
+
+  // ─── Helpers ──────────────────────────────────────────────────────
+
+  /** Lazy-init a prepared statement (created on first use, after db is open). */
+  private lazy<T>(factory: () => T): () => T {
+    let cached: T | null = null;
+    return () => {
+      if (!cached) cached = factory();
+      return cached;
+    };
   }
 }

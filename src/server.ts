@@ -1,8 +1,9 @@
 /**
  * Skald Live Dashboard Server
  *
- * Serves the dashboard HTML on an HTTP port. Each page load regenerates
- * from the live database — no static file needed.
+ * Serves the dashboard HTML on an HTTP port. Uses better-sqlite3 which
+ * handles concurrent reads/writes with proper file locking — no need
+ * to re-open the DB on each request.
  *
  * Default port: 18803
  */
@@ -11,29 +12,23 @@ import { createServer } from "http";
 import { SkaldDatabase } from "./database.js";
 import { gatherDashboardData, generateDashboardHtml } from "./dashboard.js";
 
+const NO_CACHE_HEADERS = {
+  "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+  "Pragma": "no-cache",
+};
+
 export async function startDashboardServer(dbPath: string, port: number): Promise<void> {
-  // Re-open the DB on each request so we always see the latest data.
-  // sql.js loads the file into memory at init — it won't see external writes otherwise.
-  async function freshDb(): Promise<SkaldDatabase> {
-    const db = new SkaldDatabase(dbPath);
-    await db.init();
-    return db;
-  }
+  const db = new SkaldDatabase(dbPath);
+  await db.init();
 
   const server = createServer(async (_req, res) => {
     const url = _req.url ?? "/";
 
     if (url === "/" || url === "/index.html") {
       try {
-        const db = await freshDb();
         const data = gatherDashboardData(db);
-        db.close();
         const html = generateDashboardHtml(data);
-        res.writeHead(200, {
-          "Content-Type": "text/html; charset=utf-8",
-          "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
-          "Pragma": "no-cache",
-        });
+        res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", ...NO_CACHE_HEADERS });
         res.end(html);
       } catch (err: any) {
         res.writeHead(500, { "Content-Type": "text/plain" });
@@ -41,14 +36,8 @@ export async function startDashboardServer(dbPath: string, port: number): Promis
       }
     } else if (url === "/api/plans") {
       try {
-        const db = await freshDb();
         const data = gatherDashboardData(db);
-        db.close();
-        res.writeHead(200, {
-          "Content-Type": "application/json",
-          "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
-          "Pragma": "no-cache",
-        });
+        res.writeHead(200, { "Content-Type": "application/json", ...NO_CACHE_HEADERS });
         res.end(JSON.stringify(data.plans));
       } catch (err: any) {
         res.writeHead(500, { "Content-Type": "application/json" });
@@ -56,14 +45,8 @@ export async function startDashboardServer(dbPath: string, port: number): Promis
       }
     } else if (url === "/api/stats") {
       try {
-        const db = await freshDb();
         const data = gatherDashboardData(db);
-        db.close();
-        res.writeHead(200, {
-          "Content-Type": "application/json",
-          "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
-          "Pragma": "no-cache",
-        });
+        res.writeHead(200, { "Content-Type": "application/json", ...NO_CACHE_HEADERS });
         res.end(JSON.stringify({
           stats: data.stats,
           byProduct: data.byProduct,
