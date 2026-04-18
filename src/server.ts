@@ -31,7 +31,8 @@ export async function startDashboardServer(dbPath: string, port: number): Promis
         const html = generateDashboardHtml(data);
         res.writeHead(200, {
           "Content-Type": "text/html; charset=utf-8",
-          "Cache-Control": "no-cache",
+          "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+          "Pragma": "no-cache",
         });
         res.end(html);
       } catch (err: any) {
@@ -45,7 +46,8 @@ export async function startDashboardServer(dbPath: string, port: number): Promis
         db.close();
         res.writeHead(200, {
           "Content-Type": "application/json",
-          "Cache-Control": "no-cache",
+          "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+          "Pragma": "no-cache",
         });
         res.end(JSON.stringify(data.plans));
       } catch (err: any) {
@@ -59,7 +61,8 @@ export async function startDashboardServer(dbPath: string, port: number): Promis
         db.close();
         res.writeHead(200, {
           "Content-Type": "application/json",
-          "Cache-Control": "no-cache",
+          "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+          "Pragma": "no-cache",
         });
         res.end(JSON.stringify({
           stats: data.stats,
